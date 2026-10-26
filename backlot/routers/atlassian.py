@@ -1993,12 +1993,15 @@ async def confluence_space_get(key: str, request: Request):
 
 @router.get("/wiki/rest/api/search", response_model=ConfluenceResults, openapi_extra=_P_CQL)
 async def confluence_cql_search(request: Request):
-    """CQL search used by Confluence clients (e.g. mcp-atlassian). Four clauses are read: a `~`
-    operand is a keyword search over the ACL-visible corpus, and `space`, `type` and `label` filter
-    its matches, or the whole ACL-visible corpus when there is no `~`. Measured 2026-10-05 with no
+    """CQL search used by Confluence clients (e.g. mcp-atlassian). Seven clauses are read: a `~`
+    operand is a keyword search over the ACL-visible corpus, and `space`, `type`, `label`, `id`,
+    `ancestor` and `parent` filter its matches, or the whole ACL-visible corpus when there is no `~`.
+    `id` matches the content id the content reads serve, `id in (...)` matches any of the ids it
+    names, `parent` matches direct children only, and `ancestor` matches every descendant, each
+    measured 2026-10-23 against Confluence Cloud. Measured 2026-10-05 with no
     `~`: real's `type=page` is every page on the site and `space=<KEY> and type=page` that space's
     pages; its `space=<KEY>` also holds the space's attachments, comments and the space itself,
-    where this server answers the space's pages and blogposts. A CQL holding none of the four names
+    where this server answers the space's pages and blogposts. A CQL holding none of the seven names
     only fields this route does not read, and answers no row. A `Content-Type` it will not read is
     refused before this runs (:func:`_refuse_the_search_media_type`)."""
     conn = auth.conn(request)
@@ -2016,7 +2019,7 @@ async def confluence_cql_search(request: Request):
     cql = cqls[0]
     m = re.search(r'(?:text|title)\s*~\s*"?([^"~]+)"?', cql) or re.search(r'~\s*"?([^"~]+)"?', cql)
     term = m.group(1).strip() if m else ""
-    # honor the common structured CQL clauses: space / type / label
+    # honor the common structured CQL clauses: space / type / label / id / ancestor / parent
     ms = re.search(r'space(?:\.key)?\s*=\s*"?([A-Za-z0-9_-]+)"?', cql)
     space_key = ms.group(1) if ms else None
     space_unresolvable = False
@@ -2030,6 +2033,20 @@ async def confluence_cql_search(request: Request):
     want_type = mt.group(1) if mt else None
     ml = re.search(r'label\s*(?:=|in)\s*"?([^")\s]+)"?', cql)
     want_label = ml.group(1) if ml else None
+    # id: the content id the content reads serve, as sent, bare or quoted; id in (...)
+    # names several. ancestor: every descendant of the named content, parent: its direct
+    # children only — both name the content id, and the chain is walked through parent_id.
+    mi = re.search(r'id\s*=\s*"?([A-Za-z0-9_-]+)"?', cql)
+    want_id = mi.group(1) if mi else None
+    mii = re.search(r"id\s+in\s*\(([^)]*)\)", cql)
+    want_ids = None
+    if mii:
+        want_ids = {v.strip().strip("\"'") for v in mii.group(1).split(",")}
+        want_ids.discard("")
+    ma = re.search(r'ancestor\s*=\s*"?([A-Za-z0-9_-]+)"?', cql)
+    want_ancestor = ma.group(1) if ma else None
+    mp = re.search(r'parent\s*=\s*"?([A-Za-z0-9_-]+)"?', cql)
+    want_parent = mp.group(1) if mp else None
     _refuse_negative_page_params(limit, start)
     tokens = _cql_tokens(cql)
     refusal = _cql_refusal(tokens)
@@ -2043,12 +2060,42 @@ async def confluence_cql_search(request: Request):
     # totalSize reflects the true match count (not just the returned page).
     if term:
         everything = store.search_documents(conn, term, "confluence", ids, limit=100_000, offset=0)
-    elif space_key or want_type or want_label:
+    elif (
+        space_key
+        or want_type
+        or want_label
+        or want_id
+        or want_ids is not None
+        or want_ancestor
+        or want_parent
+    ):
         everything = store.list_documents(
             conn, "confluence", container=None, visible_ids=ids, limit=100_000, offset=0
         )
     else:
         everything = []
+
+    # the parent of every row already fetched, so a chain inside the visible corpus costs no
+    # further read; a link outside it is read from the store, as the content read's own
+    # ancestors expansion does. A visited set keeps a corrupt chain from looping.
+    parents = {str(r["id"]): r["parent_id"] for r in everything}
+
+    def _ancestor_ids(row) -> set:
+        chain = set()
+        pid = row["parent_id"]
+        seen = set()
+        while pid is not None:
+            key = str(pid)
+            if key in seen:
+                break
+            seen.add(key)
+            chain.add(key)
+            if key in parents:
+                pid = parents[key]
+            else:
+                prow = store.get_document(conn, "confluence", pid)
+                pid = prow["parent_id"] if prow is not None else None
+        return chain
 
     def _match(r) -> bool:
         if space_unresolvable:
@@ -2058,6 +2105,16 @@ async def confluence_cql_search(request: Request):
         if want_type and (r["subtype"] or "page") != want_type:
             return False
         if want_label and want_label not in store.jcol(r, "labels"):
+            return False
+        if want_id is not None and str(r["id"]) != want_id:
+            return False
+        if want_ids is not None and str(r["id"]) not in want_ids:
+            return False
+        if want_parent is not None and (
+            r["parent_id"] is None or str(r["parent_id"]) != want_parent
+        ):
+            return False
+        if want_ancestor is not None and want_ancestor not in _ancestor_ids(r):
             return False
         return True
 

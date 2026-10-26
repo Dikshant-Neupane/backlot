@@ -1224,6 +1224,43 @@ def test_confluence_cql_search_filtered_by_space(client, admin_h):
     assert bogus["results"] == [] and bogus["totalSize"] == 0
 
 
+def test_confluence_cql_search_filtered_by_id_ancestor_parent(client, admin_h):
+    # A clause on id, ancestor or parent was not read at all — alone it
+    # answered no row, and beside type or space it was dropped, so the other
+    # clause carried the answer. Real filters on each, as the search route's
+    # docstring records. SAMPLE's confluence rows are a parent
+    # (Engineering Handbook), its child (On-call Runbook) and a page in
+    # another space (Compensation Bands 2026).
+    rows = client.get(
+        "/atlassian/wiki/rest/api/content",
+        headers=admin_h,
+        params={"expand": "space"},
+    ).json()["results"]
+    ids = {r["title"]: r["id"] for r in rows}
+    key = next(r["space"]["key"] for r in rows if r["title"] == "Engineering Handbook")
+
+    def search(cql):
+        j = client.get(
+            "/atlassian/wiki/rest/api/search", headers=admin_h, params={"cql": cql}
+        ).json()
+        return j["totalSize"], sorted(r["title"] for r in j["results"])
+
+    child = ids["On-call Runbook"]
+    other = ids["Compensation Bands 2026"]
+    parent = ids["Engineering Handbook"]
+    assert search(f"id={child}") == (1, ["On-call Runbook"])
+    assert search(f"id in ({child},{other})") == (
+        2,
+        ["Compensation Bands 2026", "On-call Runbook"],
+    )
+    assert search(f"type=page and id={child}") == (1, ["On-call Runbook"])
+    assert search(f"space={key} and id={child}") == (1, ["On-call Runbook"])
+    assert search(f"ancestor={parent}") == (1, ["On-call Runbook"])
+    assert search(f"parent={parent}") == (1, ["On-call Runbook"])
+    assert search(f"type=page and ancestor={parent}") == (1, ["On-call Runbook"])
+    assert search(f"id={parent} and ancestor={parent}") == (0, [])
+
+
 _CQL_REQUIRED = {
     "statusCode": 400,
     "data": {"authorized": True, "valid": True, "errors": [], "successful": True},
