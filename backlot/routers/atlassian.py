@@ -1995,10 +1995,12 @@ async def confluence_space_get(key: str, request: Request):
 async def confluence_cql_search(request: Request):
     """CQL search used by Confluence clients (e.g. mcp-atlassian). Seven clauses are read: a `~`
     operand is a keyword search over the ACL-visible corpus, and `space`, `type`, `label`, `id`,
-    `ancestor` and `parent` filter its matches, or the whole ACL-visible corpus when there is no `~`.
-    `id` matches the content id the content reads serve, `id in (...)` matches any of the ids it
-    names, `parent` matches direct children only, and `ancestor` matches every descendant, each
-    measured 2026-10-23 against Confluence Cloud. Measured 2026-10-05 with no
+    `ancestor` and `parent` filter its matches, or the whole ACL-visible corpus when there is no
+    `~`. `id`, `ancestor` and `parent` take `=` or `in (...)` and name the content id the content
+    reads serve; `parent` selects the direct children and `ancestor` every descendant, grandchildren
+    included (Confluence Cloud, 2026-10-26, over a chain of three pages). Real answers
+    `parent in (...)` with a 500, where this server answers the children of each id it names.
+    Measured 2026-10-05 with no `~`: real's `type=page` is every page on the site and
     `~`: real's `type=page` is every page on the site and `space=<KEY> and type=page` that space's
     pages; its `space=<KEY>` also holds the space's attachments, comments and the space itself,
     where this server answers the space's pages and blogposts. A CQL holding none of the seven names
@@ -2033,20 +2035,23 @@ async def confluence_cql_search(request: Request):
     want_type = mt.group(1) if mt else None
     ml = re.search(r'label\s*(?:=|in)\s*"?([^")\s]+)"?', cql)
     want_label = ml.group(1) if ml else None
-    # id: the content id the content reads serve, as sent, bare or quoted; id in (...)
-    # names several. ancestor: every descendant of the named content, parent: its direct
-    # children only — both name the content id, and the chain is walked through parent_id.
-    mi = re.search(r'id\s*=\s*"?([A-Za-z0-9_-]+)"?', cql)
-    want_id = mi.group(1) if mi else None
-    mii = re.search(r"id\s+in\s*\(([^)]*)\)", cql)
-    want_ids = None
-    if mii:
-        want_ids = {v.strip().strip("\"'") for v in mii.group(1).split(",")}
-        want_ids.discard("")
-    ma = re.search(r'ancestor\s*=\s*"?([A-Za-z0-9_-]+)"?', cql)
-    want_ancestor = ma.group(1) if ma else None
-    mp = re.search(r'parent\s*=\s*"?([A-Za-z0-9_-]+)"?', cql)
-    want_parent = mp.group(1) if mp else None
+
+    def _content_ids(field: str) -> list[set[str]]:
+        # the ids each `<field> = <id>` and `<field> in (<id>, ...)` clause names, bare or quoted,
+        # the first of each spelling read, as for the clauses above; a list that is empty or ends
+        # in a comma is `_cql_refusal`'s 400 below.
+        clauses = []
+        m = re.search(rf'\b{field}\s*=\s*"?([A-Za-z0-9_-]+)"?', cql, re.IGNORECASE)
+        if m:
+            clauses.append({m.group(1)})
+        m = re.search(rf"\b{field}\s+in\s*\(([^)]*)\)", cql, re.IGNORECASE)
+        if m:
+            clauses.append({v.strip().strip("\"'") for v in m.group(1).split(",")})
+        return clauses
+
+    want_ids = _content_ids("id")
+    want_ancestors = _content_ids("ancestor")
+    want_parents = _content_ids("parent")
     _refuse_negative_page_params(limit, start)
     tokens = _cql_tokens(cql)
     refusal = _cql_refusal(tokens)
@@ -2060,41 +2065,28 @@ async def confluence_cql_search(request: Request):
     # totalSize reflects the true match count (not just the returned page).
     if term:
         everything = store.search_documents(conn, term, "confluence", ids, limit=100_000, offset=0)
-    elif (
-        space_key
-        or want_type
-        or want_label
-        or want_id
-        or want_ids is not None
-        or want_ancestor
-        or want_parent
-    ):
+    elif space_key or want_type or want_label or want_ids or want_ancestors or want_parents:
         everything = store.list_documents(
             conn, "confluence", container=None, visible_ids=ids, limit=100_000, offset=0
         )
     else:
         everything = []
 
-    # the parent of every row already fetched, so a chain inside the visible corpus costs no
-    # further read; a link outside it is read from the store, as the content read's own
-    # ancestors expansion does. A visited set keeps a corrupt chain from looping.
-    parents = {str(r["id"]): r["parent_id"] for r in everything}
+    # the parent of every row fetched, and of every page read since, so each link of a chain is
+    # read once; a link outside the fetched rows (a page the `~` term missed, or one the caller
+    # cannot see) is read from the store, as the content read's `ancestors` expansion does.
+    parents = {str(r["id"]): r["parent_id"] for r in everything} if want_ancestors else {}
 
-    def _ancestor_ids(row) -> set:
-        chain = set()
+    def _ancestor_ids(row) -> set[str]:
+        chain: set[str] = set()
         pid = row["parent_id"]
-        seen = set()
-        while pid is not None:
+        while pid is not None and str(pid) not in chain:  # a chain that loops stops here
             key = str(pid)
-            if key in seen:
-                break
-            seen.add(key)
             chain.add(key)
-            if key in parents:
-                pid = parents[key]
-            else:
+            if key not in parents:
                 prow = store.get_document(conn, "confluence", pid)
-                pid = prow["parent_id"] if prow is not None else None
+                parents[key] = prow["parent_id"] if prow is not None else None
+            pid = parents[key]
         return chain
 
     def _match(r) -> bool:
@@ -2106,16 +2098,17 @@ async def confluence_cql_search(request: Request):
             return False
         if want_label and want_label not in store.jcol(r, "labels"):
             return False
-        if want_id is not None and str(r["id"]) != want_id:
+        if any(str(r["id"]) not in named for named in want_ids):
             return False
-        if want_ids is not None and str(r["id"]) not in want_ids:
-            return False
-        if want_parent is not None and (
-            r["parent_id"] is None or str(r["parent_id"]) != want_parent
+        if want_parents and (
+            r["parent_id"] is None
+            or any(str(r["parent_id"]) not in named for named in want_parents)
         ):
             return False
-        if want_ancestor is not None and want_ancestor not in _ancestor_ids(r):
-            return False
+        if want_ancestors:
+            chain = _ancestor_ids(r)
+            if any(named.isdisjoint(chain) for named in want_ancestors):
+                return False
         return True
 
     matched = [r for r in everything if _match(r)]
