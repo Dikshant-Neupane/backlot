@@ -2001,11 +2001,11 @@ async def confluence_cql_search(request: Request):
     included (Confluence Cloud, 2026-10-26, over a chain of three pages). Real answers
     `parent in (...)` with a 500, where this server answers the children of each id it names.
     Measured 2026-10-05 with no `~`: real's `type=page` is every page on the site and
-    `~`: real's `type=page` is every page on the site and `space=<KEY> and type=page` that space's
-    pages; its `space=<KEY>` also holds the space's attachments, comments and the space itself,
-    where this server answers the space's pages and blogposts. A CQL holding none of the seven names
-    only fields this route does not read, and answers no row. A `Content-Type` it will not read is
-    refused before this runs (:func:`_refuse_the_search_media_type`)."""
+    `space=<KEY> and type=page` that space's pages; its `space=<KEY>` also holds the space's
+    attachments, comments and the space itself, where this server answers the space's pages and
+    blogposts. A CQL holding none of the seven names only fields this route does not read, and
+    answers no row. A `Content-Type` it will not read is refused before this runs
+    (:func:`_refuse_the_search_media_type`)."""
     conn = auth.conn(request)
     caller = _confluence_caller(request, not_permitted=True)
     ids = auth.visible_ids(request, caller)
