@@ -214,7 +214,7 @@ def build() -> dict:
     unserved = sorted(e["operation"] for e in baseline if e["status"] == "missing")
     if dropped := [key for key in unserved if key not in security]:
         raise SystemExit(
-            f"the baseline lists as missing operations the documents no longer publish: {dropped}; "
+            f"the baseline records `missing` operations the documents no longer publish: {dropped}; "
             "rerun `backlot diff --source jira --update-baseline` first"
         )
     refused, run = {}, {}

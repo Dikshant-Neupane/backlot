@@ -423,8 +423,8 @@ does not delete it — until someone reads the new shape and rewrites it by hand
 A run also reports **resolved** entries: an acknowledged divergence the vendor no longer has. The
 baseline has gone stale, which is its own kind of drift, and the run exits 1 for it as for a new
 finding. A stale `gap` entry is not inert: it is matched by what it names alone, so it would
-acknowledge, unreviewed, whatever the vendor later publishes at that name, and a `missing`
-operation's entry is what the routers answer that path from as an operation the vendor publishes.
+acknowledge, unreviewed, whatever the vendor later publishes at that name, and the routers answer
+the path of a `missing` operation's entry as an operation the vendor publishes.
 Where Backlot is what changed — a route, a parameter or a field added while the file still records
 it `missing` — `tests/test_fidelity.py` reads the served surface off the app and the SDL, and S3's
 off a local Backlot, with no vendor network, and fails until the file is rewritten. Rewrite it with `--update-baseline`. By hand, delete

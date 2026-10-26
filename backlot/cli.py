@@ -870,9 +870,9 @@ def diff(
             raise typer.Exit(1)
         return
 
-    # A stale entry fails the run as a new finding does. It goes on acknowledging, by what it names
-    # alone, whatever the vendor publishes there next, and a `missing` operation's entry is what
-    # `backlot.published` and the Atlassian routers answer that path as a published operation from.
+    # A stale entry fails the run as a new finding does. A stale gap goes on acknowledging, by what
+    # it names alone, whatever the vendor publishes there next, and the routers answer the path of a
+    # `missing` operation's entry as one the vendor publishes.
     if as_json:
         _emit_json(source, spec.endpoints, findings, new=fresh, resolved=stale)
         if fresh or stale:
