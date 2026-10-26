@@ -778,7 +778,7 @@ def diff(
 ) -> None:
     """Compare the schema Backlot serves against the vendor's own, in both directions.
 
-    Fidelity is measured, never assumed — and until this command a measurement only happened when someone went looking. Run on a schedule, it is what notices the vendor changing something in March. Divergences already read and accepted live in `backlot/fidelity/baseline/<source>.json`, so a run reports what is NEW; accepting one is a file change that goes through review. Exits 1 when anything is unacknowledged, 2 when the vendor's contract could not be read at all — a vendor outage is not a fidelity finding — and 3 when a credential this source declares is not set anywhere or the baseline file cannot be read or written, which is a configuration problem rather than either.
+    Fidelity is measured, never assumed — and until this command a measurement only happened when someone went looking. Run on a schedule, it is what notices the vendor changing something in March. Divergences already read and accepted live in `backlot/fidelity/baseline/<source>.json`, so a run reports what is NEW; accepting one is a file change that goes through review. Exits 1 when anything is unacknowledged or the baseline acknowledges a divergence the vendor no longer has, 2 when the vendor's contract could not be read at all — a vendor outage is not a fidelity finding — and 3 when a credential this source declares is not set anywhere or the baseline file cannot be read or written, which is a configuration problem rather than either.
     """  # noqa: E501 — see the note on `serve`: a paragraph must be one source line.
     from backlot.fidelity import (
         BREAKING,
@@ -870,9 +870,12 @@ def diff(
             raise typer.Exit(1)
         return
 
+    # A stale entry fails the run as a new finding does. It goes on acknowledging, by what it names
+    # alone, whatever the vendor publishes there next, and a `missing` operation's entry is what
+    # `backlot.published` and the Atlassian routers answer that path as a published operation from.
     if as_json:
         _emit_json(source, spec.endpoints, findings, new=fresh, resolved=stale)
-        if fresh:
+        if fresh or stale:
             raise typer.Exit(1)
         return
 
@@ -903,6 +906,8 @@ def diff(
         for f in stale:
             typer.echo(f"     {typer.style(f.path, bold=True)}")
     if not fresh:
+        if stale:
+            raise typer.Exit(1)
         typer.echo("")
         typer.echo(typer.style("✅ nothing new", fg="green", bold=True))
         return

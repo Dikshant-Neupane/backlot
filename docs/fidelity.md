@@ -87,11 +87,12 @@ unnoticed.
 Prefer the environment. A value passed on the command line is visible to any process that can run
 `ps`, and it lands in shell history.
 
-Exit codes are distinct on purpose: `1` is "the contracts disagree", `2` is "the vendor's contract
-could not be read", and `3` is "a credential this source declares is not set anywhere". A vendor
-outage is not a fidelity finding, and a credential nobody set is this repository's problem rather
-than either — the scheduled run fails on `3` for that reason, because warned about and left green
-it would leave the two introspection sources uncompared night after night.
+Exit codes are distinct on purpose: `1` is "the contracts disagree" — a new divergence, or a
+baseline entry for one the vendor no longer has — `2` is "the vendor's contract could not be read",
+and `3` is "a credential this source declares is not set anywhere". A vendor outage is not a
+fidelity finding, and a credential nobody set is this repository's problem rather than either — the
+scheduled run fails on `3` for that reason, because warned about and left green it would leave the
+two introspection sources uncompared night after night.
 
 ## A published spec is weaker evidence than introspection
 
@@ -420,10 +421,13 @@ again, and left in the file as written — the note is the record of the reasoni
 does not delete it — until someone reads the new shape and rewrites it by hand.
 
 A run also reports **resolved** entries: an acknowledged divergence the vendor no longer has. The
-baseline has gone stale, which is its own kind of drift. Where Backlot is what changed — a route,
-a parameter or a field added while the file still records it `missing` — `tests/test_fidelity.py`
-reads the served surface off the app and the SDL, and S3's off a local Backlot, with no vendor
-network, and fails until the file is rewritten. Rewrite it with `--update-baseline`. By hand, delete
+baseline has gone stale, which is its own kind of drift, and the run exits 1 for it as for a new
+finding. A stale `gap` entry is not inert: it is matched by what it names alone, so it would
+acknowledge, unreviewed, whatever the vendor later publishes at that name, and a `missing`
+operation's entry is what the routers answer that path from as an operation the vendor publishes.
+Where Backlot is what changed — a route, a parameter or a field added while the file still records
+it `missing` — `tests/test_fidelity.py` reads the served surface off the app and the SDL, and S3's
+off a local Backlot, with no vendor network, and fails until the file is rewritten. Rewrite it with `--update-baseline`. By hand, delete
 the element's `kind`, `severity`, `detail` and `note`, and the element itself only where neither
 side has it any more: an element Backlot serves stays in the file, and deleting it fails that test.
 
@@ -432,8 +436,8 @@ side has it any more: an element Backlot serves stays in the file, and deleting 
 [`.github/workflows/fidelity.yml`](../.github/workflows/fidelity.yml) runs every source daily,
 and on demand through `workflow_dispatch`. Never on a pull request: drift is this project's bug,
 but it is never the bug of whichever pull request happens to be open when a vendor ships a change,
-and a contributor fixing a typo must not be blocked by it. A new divergence opens an issue and
-turns the scheduled run red instead.
+and a contributor fixing a typo must not be blocked by it. A new divergence or a stale entry opens
+an issue and turns the scheduled run red instead.
 
 A source has one open issue at a time. It is opened under the `fidelity` label — the vendor API
 defines the right answer, so closing one needs a measurement against it — titled with the date the
