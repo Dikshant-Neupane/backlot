@@ -843,12 +843,6 @@ def _database_obj(conn, row, version: str) -> dict:
     # A database's timestamps follow the version: the minute form under earlier versions, as a
     # page's are, and seconds with a `+00:00` offset under the data sources model.
     if _data_sources_model(version):
-        created_time = synth.rfc3339_offset_millis(created)
-        last_edited_time = synth.rfc3339_offset_millis(updated)
-    else:
-        created_time = synth.rfc3339_minute(created)
-        last_edited_time = synth.rfc3339_minute(updated)
-    if _data_sources_model(version):
         return {
             "object": "database",
             "id": did,
@@ -859,8 +853,8 @@ def _database_obj(conn, row, version: str) -> dict:
             "database_type": None,
             "in_trash": False,
             "is_locked": False,
-            "created_time": created_time,
-            "last_edited_time": last_edited_time,
+            "created_time": synth.rfc3339_offset_millis(created),
+            "last_edited_time": synth.rfc3339_offset_millis(updated),
             "data_sources": [{"id": row["data_source_id"], "name": row["title"]}],
             "icon": _emoji_icon(row["icon"]),
             "cover": _cover(row["cover"]),
@@ -873,10 +867,10 @@ def _database_obj(conn, row, version: str) -> dict:
         "id": did,
         "cover": _cover(row["cover"]),
         "icon": _emoji_icon(row["icon"]),
-        "created_time": created_time,
+        "created_time": synth.rfc3339_minute(created),
         "created_by": _partial_user(row["author_email"]),
         "last_edited_by": _partial_user(row["author_email"]),
-        "last_edited_time": last_edited_time,
+        "last_edited_time": synth.rfc3339_minute(updated),
         "title": synth.notion_rich_text(row["title"]),
         "description": synth.notion_rich_text(row["content"]),
         "is_inline": False,
