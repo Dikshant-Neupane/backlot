@@ -1384,6 +1384,68 @@ def test_confluence_cql_search_filtered_by_each_structured_clause(tmp_path):
     assert answered == {template: (want, len(want)) for template, want in rows}
 
 
+def test_confluence_cql_search_reads_a_query_as_a_boolean_expression(tmp_path):
+    """Pins the boolean reading :func:`backlot.routers.atlassian.confluence_cql_search`'s
+    docstring records: a negated `~` clause leaves out the rows the term matches, `or`
+    selects either side, `and` binds tighter than `or`, and a `not` in front of a negated
+    clause reads, where the clause readers read each of those as the clause itself, as `and`,
+    or not at all. Same chain corpus as the structured-clause test: Grand alone carries `Deep`
+    in its body and `oncall` as a label."""
+    page = {
+        "source_type": "confluence",
+        "space": "eng",
+        "content": "Body.",
+        "author_email": "ava@acme.com",
+        "visibility": "public",
+    }
+    settings = tiny_corpus(
+        tmp_path,
+        [
+            {**page, "doc_id": "q-gp", "title": "Guide"},
+            {**page, "doc_id": "q-c", "title": "Child", "parent": "q-gp", "labels": ["pager"]},
+            {
+                **page,
+                "doc_id": "q-gc",
+                "title": "Grand",
+                "parent": "q-c",
+                "content": "Deep.",
+                "labels": ["oncall"],
+            },
+            {**page, "doc_id": "q-o", "title": "Other", "space": "ops"},
+            {**page, "doc_id": "q-b", "title": "Post", "space": "ops", "subtype": "blogpost"},
+        ],
+    )
+    three = "id in ({Guide},{Child},{Grand})"
+    rows = [
+        (three + ' and text !~ "Deep"', {"Guide", "Child"}),
+        (three + ' and not text ~ "Deep"', {"Guide", "Child"}),
+        ('text !~ "Deep"', {"Guide", "Child", "Other", "Post"}),
+        (three + ' and text ~ "Deep"', {"Grand"}),
+        (three + ' and title !~ "Grand"', {"Guide", "Child"}),
+        (three + ' and not title ~ "Grand"', {"Guide", "Child"}),
+        ("id={Guide} or id={Child}", {"Guide", "Child"}),
+        (three + " and (id={Guide} or id={Child})", {"Guide", "Child"}),
+        (three + ' and (ancestor={Guide} or label="oncall")', {"Child", "Grand"}),
+        ("id={Guide} or id={Child} and type=blogpost", {"Guide"}),
+        ("(id={Guide} or id={Child}) and type=blogpost", set()),
+        (three + " and not (id={Child} or id={Grand})", {"Guide"}),
+        (three + " and not (id={Child} and type=page)", {"Guide", "Grand"}),
+        (three + " and not id != {Child}", {"Child"}),
+        (three + " and not ancestor != {Guide}", {"Child", "Grand"}),
+    ]
+    with client_for(settings, reload=True) as c:
+        written = yaml.safe_load(settings.tokens_path.read_text(encoding="utf-8"))
+        h = {"Authorization": f"Bearer {written['admin_token']}"}
+        content = c.get("/atlassian/wiki/rest/api/content", headers=h).json()["results"]
+        ids = {r["title"]: r["id"] for r in content}
+        answered = {}
+        for template, _ in rows:
+            cql = template.format(**ids)
+            r = c.get("/atlassian/wiki/rest/api/search", headers=h, params={"cql": cql}).json()
+            answered[template] = ({x["title"] for x in r["results"]}, r["totalSize"])
+    assert answered == {template: (want, len(want)) for template, want in rows}
+
+
 _CQL_REQUIRED = {
     "statusCode": 400,
     "data": {"authorized": True, "valid": True, "errors": [], "successful": True},
