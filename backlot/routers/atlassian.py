@@ -2193,15 +2193,18 @@ async def confluence_cql_search(request: Request):
                 return False
         return True
 
-    # The boolean reading of the same tokens `_cql_refusal` walks: `and` before `or`,
-    # parentheses, and a `not` after `and` around a clause or a group, over the full
-    # ACL-visible corpus, so a lone negated `~` answers every row but the term's matches, as
-    # real does. A `~` atom is membership in that term's keyword-search set; the other atoms
-    # reuse the readers above (an absent field passes a negated clause, a space key resolves
-    # through `_space_container_for_key`, an unresolvable positive space key matches nothing).
-    # An atom this route does not read answers no row, and a `not` straight on one answers no
-    # row either, which is what the clause readers answer for a lone query of either. Where the
-    # tokens do not parse this way, the clause readers above stay the answer.
+    # The boolean reading of the query (`_cql_parse`) over the full ACL-visible corpus, so a lone
+    # negated `~` answers every row but the term's matches, as real does. A `~` atom is membership
+    # in that term's keyword-search set; the other atoms read their fields as the readers above do
+    # (an absent field passes a negated clause, a space key resolves through
+    # `_space_container_for_key`, an unresolvable positive space key matches nothing). An atom this
+    # route does not read passes, negated or not, and a query with no atom it reads answers no row.
+    # Beside an `id in (...)` naming three pages made that day, real answered
+    # `lastmodified > 2020-01-01`, `created >= "2020-01-01"`, `creator = currentUser()` and
+    # `not lastmodified > 2999-01-01` with the three, as this route does, and
+    # `lastmodified > 2999-01-01`, `not lastmodified > 2020-01-01` and `not creator = currentUser()`
+    # with none, where this route answers the three (Confluence Cloud, 2026-10-28). Where the tokens
+    # do not parse this way, the clause readers above stay the answer.
     evaluated = None
     try:
         expr = _cql_parse(tokens)
@@ -2230,42 +2233,37 @@ async def confluence_cql_search(request: Request):
             if kind == "not":
                 child = node[1]
                 if child[0] == "atom" and not child[5]:
-                    return False
+                    return True
                 return not _eval(child, r)
             _, field, op, values, negated, readable = node
             if not readable:
-                return False
-            if field in ("text", "title"):
+                return True
+            if field in ("text", "title", "sitesearch"):
                 hit = str(r["id"]) in _term_ids(values[0])
             elif field in ("space", "space.key"):
-                resolved = [_space_container_for_key(conn, v) for v in values]
-                if op == "=":
-                    hit = resolved[0] is not None and r["space"] == resolved[0]
-                else:
-                    hit = r["space"] in {c for c in resolved if c is not None}
+                containers = {_space_container_for_key(conn, v) for v in values} - {None}
+                hit = r["space"] in containers
             elif field == "type":
-                mine = r["subtype"] or "page"
-                hit = mine == values[0] if op == "=" else mine in values
+                hit = (r["subtype"] or "page") in values
             elif field == "label":
-                labels = store.jcol(r, "labels")
-                hit = values[0] in labels if op == "=" else not set(values).isdisjoint(labels)
+                hit = not set(values).isdisjoint(store.jcol(r, "labels"))
             elif field == "id":
-                mine = str(r["id"])
-                hit = mine == values[0] if op == "=" else mine in values
+                hit = str(r["id"]) in values
             elif field == "ancestor":
-                chain = _ancestor_ids(r)
-                hit = values[0] in chain if op == "=" else not set(values).isdisjoint(chain)
+                hit = not set(values).isdisjoint(_ancestor_ids(r))
             elif field == "parent":
-                pid = r["parent_id"]
-                hit = pid is not None and (
-                    str(pid) == values[0] if op == "=" else str(pid) in values
-                )
+                hit = r["parent_id"] is not None and str(r["parent_id"]) in values
             else:  # pragma: no cover - readable is False for any other field
                 hit = False
             return (not hit) if negated else hit
 
-        evaluated = [r for r in eval_rows if _eval(expr, r)]
-    except Exception:
+        def _reads(node) -> bool:
+            if node[0] == "atom":
+                return node[5]
+            return any(_reads(child) for child in node[1:])
+
+        evaluated = [r for r in eval_rows if _eval(expr, r)] if _reads(expr) else []
+    except _CQLParseError:
         evaluated = None
 
     matched = evaluated if evaluated is not None else [r for r in everything if _match(r)]
@@ -3344,13 +3342,17 @@ def _cql_unquote(kind: str, text: str) -> str:
     return re.sub(r"\\(.)", r"\1", text[1:-1], flags=re.S)
 
 
-# The fields :func:`confluence_cql_search` reads, and the operators each takes: `text` and
-# `title` take `~` only, the rest take `=` or `in (...)`. Anything else (a field this route does
-# not read, or an operator the field does not take, as `title="Guide"` is) reads as no row, so a
-# lone query of it answers nothing, as the clause readers answer today.
+# The fields :func:`confluence_cql_search` reads, and the operators each takes: `text`, `title`
+# and `siteSearch` take `~` only, the rest take `=` or `in (...)`. Anything else (a field this
+# route does not read, or an operator the field does not take, as `title="Guide"` is) passes.
+# `siteSearch ~` is read as `text ~` is. On 2026-10-28 real answered the two with the same pages
+# for each of two words of the site's page bodies, but not over a chain of three pages whose last
+# alone held a word: `siteSearch ~` for the word answered all three, and the same clause in an
+# `or` beside the first page's `id` answered that page alone (Confluence Cloud).
 _CQL_READABLE = {
     "text": {"~"},
     "title": {"~"},
+    "sitesearch": {"~"},
     "space": {"=", "in"},
     "space.key": {"=", "in"},
     "type": {"=", "in"},
