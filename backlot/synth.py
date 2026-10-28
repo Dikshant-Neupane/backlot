@@ -69,6 +69,23 @@ def rfc3339_millis(ts: int) -> str:
     return utc_datetime(ts).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
+def rfc3339_minute(ts: int) -> str:
+    """e.g. 2024-04-05T17:00:00.000Z for a moment at 17:00:51 (Notion page/block/data source).
+
+    Measured against api.notion.com on 2026-10-20: a page, a row, their blocks and a data source
+    answer the minute, with zero seconds and milliseconds, whatever second the corpus stores."""
+    return utc_datetime(int(ts) // 60 * 60).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def rfc3339_offset_millis(ts: int) -> str:
+    """e.g. 2024-04-05T17:00:51.000+00:00 (Notion database under 2025-09-03 and later).
+
+    Measured against api.notion.com on 2026-10-20: a database under the data sources model keeps
+    its seconds and milliseconds and spells the offset as ``+00:00`` in place of ``Z``. The
+    corpus stores seconds only, so the milliseconds are ``.000``."""
+    return utc_datetime(ts).strftime("%Y-%m-%dT%H:%M:%S.000+00:00")
+
+
 def jira_datetime(ts: int) -> str:
     """e.g. 2024-04-05T17:00:00.000+0000 (Jira)."""
     return utc_datetime(ts).strftime("%Y-%m-%dT%H:%M:%S.000+0000")
@@ -337,6 +354,20 @@ def drive_folder_id(container: str) -> str:
     must not meet."""
     digest = hashlib.sha256(("folder:" + container).encode("utf-8")).digest()
     return "0A" + base64.urlsafe_b64encode(digest)[:17].decode("ascii")
+
+
+def drive_root_id(email: str) -> str:
+    """The id of a user's My Drive root: ``0A`` plus 17 base64url characters, as a real root's is
+    (measured 2026-10-26), seeded apart from every folder's so a folder named after an address
+    cannot land on it."""
+    digest = hashlib.sha256(("root:" + email.lower()).encode("utf-8")).digest()
+    return "0A" + base64.urlsafe_b64encode(digest)[:17].decode("ascii")
+
+
+def google_user_id(email: str) -> str:
+    """A Google account's numeric id, 21 digits from ``1``: the shape of the `ouid` real puts on
+    every `spreadsheetUrl` (measured 2026-10-26)."""
+    return str(10**20 + hnum("google-user:" + email.lower(), length=32) % (9 * 10**19))
 
 
 def gdrive_file_id(seed: str) -> str:
