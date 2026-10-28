@@ -1994,20 +1994,18 @@ async def confluence_space_get(key: str, request: Request):
 @router.get("/wiki/rest/api/search", response_model=ConfluenceResults, openapi_extra=_P_CQL)
 async def confluence_cql_search(request: Request):
     """CQL search used by Confluence clients (e.g. mcp-atlassian). Real reads a query as a
-    boolean expression, `and` before `or`, with parentheses and a `not` after `and` around a
-    clause or a group, and this server evaluates it that way over the tokens `_cql_refusal`
-    walks. Seven clauses are read: a `~` operand is a keyword search over the ACL-visible
-    corpus, and `space`, `type`, `label`, `id`, `ancestor` and `parent` filter its matches, or
-    the whole ACL-visible corpus when there is no `~`. `id`, `ancestor` and `parent` take `=`
-    or `in (...)` and name the content id the content reads serve; `parent` selects the direct
-    children and `ancestor` every descendant, grandchildren included (Confluence Cloud,
-    2026-10-26, over a chain of three pages). Each of the six clauses also reads negated —
+    boolean expression, which this server evaluates through `_cql_parse`. Seven clauses are read: a
+    `~` operand matches the rows a keyword search over the ACL-visible corpus finds, and `space`,
+    `type`, `label`, `id`, `ancestor` and `parent` match on their fields. `id`, `ancestor` and
+    `parent` take `=` or `in (...)` and name the content id the content reads serve; `parent`
+    selects the direct children and `ancestor` every descendant, grandchildren included (Confluence
+    Cloud, 2026-10-26, over a chain of three pages). Each of the six clauses also reads negated —
     `!=`, `not in (...)`, or a `not` after `and` before the clause, in parentheses or not — and
-    leaves out the rows the clause names, every negated clause read and a row the field is
-    absent on passing: a page with no parent passes `parent != …` and one with no label passes
-    `label != …` (measured over the same chain on 2026-10-26 and 2026-10-27). Real answers
-    `parent in (...)` and `parent not in (...)` with a 500, where this server selects, or
-    leaves out, the children of each id the list names.
+    leaves out the rows the clause names, every negated clause read and a row the field is absent on
+    passing: a page with no parent passes `parent != …` and one with no label passes `label != …`
+    (measured over the same chain on 2026-10-26 and 2026-10-27). Real answers `parent in (...)` and
+    `parent not in (...)` with a 500, where this server selects, or leaves out, the children of each
+    id the list names.
 
     Measured 2026-10-05 with no `~`: real's `type=page` is every page on the site and
     `space=<KEY> and type=page` that space's pages; its `space=<KEY>` also holds the space's
@@ -2108,38 +2106,35 @@ async def confluence_cql_search(request: Request):
     sent_cursor = (request.query_params.getlist("cursor") or [None])[0]
     after = _cql_search_after(sent_cursor) if sent_cursor else None
 
-    # fetch the full ACL-visible match set, filter by the clauses, then paginate — so
-    # totalSize reflects the true match count (not just the returned page).
-    if term:
-        everything = store.search_documents(conn, term, "confluence", ids, limit=100_000, offset=0)
-    elif (
-        space_key
-        or want_type
-        or want_label
-        or want_ids
-        or want_ancestors
-        or want_parents
-        or not_ids
-        or not_ancestors
-        or not_parents
-        or not_types
-        or not_labels
-        or not_spaces
-    ):
-        everything = store.list_documents(
-            conn, "confluence", container=None, visible_ids=ids, limit=100_000, offset=0
-        )
-    else:
-        everything = []
+    # the rows the clause readers filter, read only for a query `_cql_parse` does not cover: the
+    # full ACL-visible match set, filtered by the clauses, then paginated — so totalSize reflects
+    # the true match count (not just the returned page).
+    def _clause_rows() -> list:
+        if term:
+            return store.search_documents(conn, term, "confluence", ids, limit=100_000, offset=0)
+        if (
+            space_key
+            or want_type
+            or want_label
+            or want_ids
+            or want_ancestors
+            or want_parents
+            or not_ids
+            or not_ancestors
+            or not_parents
+            or not_types
+            or not_labels
+            or not_spaces
+        ):
+            return store.list_documents(
+                conn, "confluence", container=None, visible_ids=ids, limit=100_000, offset=0
+            )
+        return []
 
     # the parent of every row fetched, and of every page read since, so each link of a chain is
     # read once; a link outside the fetched rows (a page the `~` term missed, or one the caller
     # cannot see) is read from the store, as the content read's `ancestors` expansion does.
-    parents = (
-        {str(r["id"]): r["parent_id"] for r in everything}
-        if want_ancestors or not_ancestors
-        else {}
-    )
+    parents: dict = {}
 
     def _ancestor_ids(row) -> set[str]:
         chain: set[str] = set()
@@ -2193,26 +2188,43 @@ async def confluence_cql_search(request: Request):
                 return False
         return True
 
-    # The boolean reading of the query (`_cql_parse`) over the full ACL-visible corpus, so a lone
-    # negated `~` answers every row but the term's matches, as real does. A `~` atom is membership
-    # in that term's keyword-search set; the other atoms read their fields as the readers above do
-    # (an absent field passes a negated clause, a space key resolves through
-    # `_space_container_for_key`, an unresolvable positive space key matches nothing). An atom this
-    # route does not read passes, negated or not, and a query with no atom it reads answers no row.
-    # Beside an `id in (...)` naming three pages made that day, real answered
-    # `lastmodified > 2020-01-01`, `created >= "2020-01-01"`, `creator = currentUser()` and
+    # The boolean reading of the query (`_cql_parse`). A `~` atom is membership in that term's
+    # keyword-search set; the other atoms read their fields as the readers above do (an absent field
+    # passes a negated clause, a space key resolves through `_space_container_for_key`, an
+    # unresolvable positive space key matches nothing). The rows read are a term's matches, in its
+    # keyword-search order, where a `~` atom on the query's top-level `and`s needs one, and the full
+    # ACL-visible corpus otherwise, so a lone negated `~` answers every row but the term's matches,
+    # as real does. An atom this route does not read passes, negated or not, and a query with no
+    # atom it reads answers no row. Beside an `id in (...)` naming three pages made that day, real
+    # answered `lastmodified > 2020-01-01`, `created >= "2020-01-01"`, `creator = currentUser()` and
     # `not lastmodified > 2999-01-01` with the three, as this route does, and
     # `lastmodified > 2999-01-01`, `not lastmodified > 2020-01-01` and `not creator = currentUser()`
     # with none, where this route answers the three (Confluence Cloud, 2026-10-28). Where the tokens
     # do not parse this way, the clause readers above stay the answer.
-    evaluated = None
     try:
         expr = _cql_parse(tokens)
-        eval_rows = store.list_documents(
-            conn, "confluence", container=None, visible_ids=ids, limit=100_000, offset=0
-        )
-        parents.update({str(r["id"]): r["parent_id"] for r in eval_rows})
         term_sets: dict[str, set[str]] = {}
+
+        def _needed_term(node) -> str | None:
+            # the term of a positive `~` atom on the query's top-level `and`s, the leftmost first
+            if node[0] == "and":
+                left = _needed_term(node[1])
+                return left if left is not None else _needed_term(node[2])
+            if node[0] == "atom" and node[2] == "~" and node[5] and not node[4]:
+                return node[3][0]
+            return None
+
+        needed = _needed_term(expr)
+        if needed is None:
+            eval_rows = store.list_documents(
+                conn, "confluence", container=None, visible_ids=ids, limit=100_000, offset=0
+            )
+        else:
+            eval_rows = store.search_documents(
+                conn, needed, "confluence", ids, limit=100_000, offset=0
+            )
+            term_sets[needed] = {str(r["id"]) for r in eval_rows}
+        parents.update({str(r["id"]): r["parent_id"] for r in eval_rows})
 
         def _term_ids(term: str) -> set[str]:
             if term not in term_sets:
@@ -2262,11 +2274,12 @@ async def confluence_cql_search(request: Request):
                 return node[5]
             return any(_reads(child) for child in node[1:])
 
-        evaluated = [r for r in eval_rows if _eval(expr, r)] if _reads(expr) else []
+        matched = [r for r in eval_rows if _eval(expr, r)] if _reads(expr) else []
     except _CQLParseError:
-        evaluated = None
+        everything = _clause_rows()
+        parents.update({str(r["id"]): r["parent_id"] for r in everything})
+        matched = [r for r in everything if _match(r)]
 
-    matched = evaluated if evaluated is not None else [r for r in everything if _match(r)]
     total = len(matched)
     position = _cql_position(matched, after[0]) if after else 0
     rows = matched[position : position + limit]
@@ -3342,12 +3355,11 @@ def _cql_unquote(kind: str, text: str) -> str:
     return re.sub(r"\\(.)", r"\1", text[1:-1], flags=re.S)
 
 
-# The fields :func:`confluence_cql_search` reads, and the operators each takes: `text`, `title`
-# and `siteSearch` take `~` only, the rest take `=` or `in (...)`. Anything else (a field this
-# route does not read, or an operator the field does not take, as `title="Guide"` is) passes.
-# `siteSearch ~` is read as `text ~` is. On 2026-10-28 real answered the two with the same pages
-# for each of two words of the site's page bodies, but not over a chain of three pages whose last
-# alone held a word: `siteSearch ~` for the word answered all three, and the same clause in an
+# The fields :func:`confluence_cql_search` reads, and the operators each takes. Anything else (a
+# field this route does not read, or an operator the field does not take, as `title="Guide"` is)
+# passes. `siteSearch ~` is read as `text ~` is. On 2026-10-28 real answered the two with the same
+# pages for each of two words of the site's page bodies, but not over a chain of three pages whose
+# last alone held a word: `siteSearch ~` for the word answered all three, and the same clause in an
 # `or` beside the first page's `id` answered that page alone (Confluence Cloud).
 _CQL_READABLE = {
     "text": {"~"},

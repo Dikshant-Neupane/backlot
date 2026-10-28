@@ -1421,6 +1421,61 @@ def test_confluence_cql_search_filtered_by_each_structured_clause(tmp_path):
     assert {x["title"] for x in site["results"]} == {"Grand"}
 
 
+def test_confluence_cql_search_reads_its_rows_once_in_a_needed_terms_order(tmp_path, monkeypatch):
+    """The rows a query is evaluated over are read once: a positive `~` clause on its top-level
+    `and`s reads that term's matches, in its keyword-search order, and a query with none lists the
+    ACL-visible corpus; each other `~` term the query reads is one search more. Each page says
+    `alpha` and `beta` a different number of times, so the two terms rank the four pages in
+    opposite orders, and neither is the order they are listed in."""
+    page = {
+        "source_type": "confluence",
+        "space": "eng",
+        "author_email": "ava@acme.com",
+        "visibility": "public",
+    }
+    words = {n: " ".join(["alpha"] * n + ["beta"] * (5 - n)) for n in (2, 4, 1, 3)}
+    settings = tiny_corpus(
+        tmp_path,
+        [
+            {**page, "doc_id": f"rank-{n}", "title": f"P{n}", "content": text}
+            for n, text in words.items()
+        ],
+    )
+    rows = [
+        # cql, the titles in the order served, and how many times the corpus is listed and a
+        # term searched
+        ('text ~ "alpha"', ["P4", "P3", "P2", "P1"], 0, 1),
+        ('text ~ "beta"', ["P1", "P2", "P3", "P4"], 0, 1),
+        ('text ~ "alpha" and text ~ "beta"', ["P4", "P3", "P2", "P1"], 0, 2),
+        ('type = page and text ~ "beta"', ["P1", "P2", "P3", "P4"], 0, 1),
+        ('text ~ "alpha" or type = page', ["P4", "P1", "P2", "P3"], 1, 1),
+        ("type = page", ["P4", "P1", "P2", "P3"], 1, 0),
+    ]
+    reads = []
+
+    def spying(name):
+        read = getattr(store, name)
+
+        def spy(*args, **kwargs):
+            reads.append(name)
+            return read(*args, **kwargs)
+
+        return spy
+
+    with client_for(settings, reload=True) as c:
+        written = yaml.safe_load(settings.tokens_path.read_text(encoding="utf-8"))
+        h = {"Authorization": f"Bearer {written['admin_token']}"}
+        for name in ("list_documents", "search_documents"):
+            monkeypatch.setattr(store, name, spying(name))
+        answered = {}
+        for cql, *_ in rows:
+            reads.clear()
+            r = c.get("/atlassian/wiki/rest/api/search", headers=h, params={"cql": cql}).json()
+            titles = [x["title"] for x in r["results"]]
+            answered[cql] = (titles, reads.count("list_documents"), reads.count("search_documents"))
+    assert answered == {cql: tuple(answer) for cql, *answer in rows}
+
+
 _CQL_REQUIRED = {
     "statusCode": 400,
     "data": {"authorized": True, "valid": True, "errors": [], "successful": True},
