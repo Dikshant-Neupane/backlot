@@ -1422,11 +1422,10 @@ def test_confluence_cql_search_filtered_by_each_structured_clause(tmp_path):
 
 
 def test_confluence_cql_search_reads_its_rows_once_in_a_needed_terms_order(tmp_path, monkeypatch):
-    """The rows a query is evaluated over are read once: a positive `~` clause on its top-level
-    `and`s reads that term's matches, in its keyword-search order, and a query with none lists the
-    ACL-visible corpus; each other `~` term the query reads is one search more. Each page says
-    `alpha` and `beta` a different number of times, so the two terms rank the four pages in
-    opposite orders, and neither is the order they are listed in."""
+    """The rows :func:`backlot.routers.atlassian.confluence_cql_search` reads for each query, as
+    the comment above its evaluator gives them, and their order. Each page says `alpha` and `beta`
+    a different number of times, so the two terms rank the four pages in opposite orders, and
+    neither is the order they are listed in."""
     page = {
         "source_type": "confluence",
         "space": "eng",

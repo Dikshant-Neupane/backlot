@@ -2191,22 +2191,21 @@ async def confluence_cql_search(request: Request):
     # The boolean reading of the query (`_cql_parse`). A `~` atom is membership in that term's
     # keyword-search set; the other atoms read their fields as the readers above do (an absent field
     # passes a negated clause, a space key resolves through `_space_container_for_key`, an
-    # unresolvable positive space key matches nothing). The rows read are a term's matches, in its
-    # keyword-search order, where a `~` atom on the query's top-level `and`s needs one, and the full
-    # ACL-visible corpus otherwise, so a lone negated `~` answers every row but the term's matches,
-    # as real does. An atom this route does not read passes, negated or not, and a query with no
-    # atom it reads answers no row. Beside an `id in (...)` naming three pages made that day, real
-    # answered `lastmodified > 2020-01-01`, `created >= "2020-01-01"`, `creator = currentUser()` and
-    # `not lastmodified > 2999-01-01` with the three, as this route does, and
-    # `lastmodified > 2999-01-01`, `not lastmodified > 2020-01-01` and `not creator = currentUser()`
-    # with none, where this route answers the three (Confluence Cloud, 2026-10-28). Where the tokens
-    # do not parse this way, the clause readers above stay the answer.
+    # unresolvable positive space key matches nothing). The rows read are the matches of the
+    # leftmost positive `~` atom on the query's top-level `and`s, in its keyword-search order, where
+    # there is one, and the full ACL-visible corpus otherwise, so a lone negated `~` answers every
+    # row but the term's matches, as real does. An atom this route does not read passes, negated or
+    # not, and a query with no atom it reads answers no row. Beside an `id in (...)` naming three
+    # pages made that day, real answered `lastmodified > 2020-01-01`, `created >= "2020-01-01"`,
+    # `creator = currentUser()` and `not lastmodified > 2999-01-01` with the three, as this route
+    # does, and `lastmodified > 2999-01-01`, `not lastmodified > 2020-01-01` and
+    # `not creator = currentUser()` with none, where this route answers the three (Confluence Cloud,
+    # 2026-10-28). Where the tokens do not parse this way, the clause readers above stay the answer.
     try:
         expr = _cql_parse(tokens)
         term_sets: dict[str, set[str]] = {}
 
         def _needed_term(node) -> str | None:
-            # the term of a positive `~` atom on the query's top-level `and`s, the leftmost first
             if node[0] == "and":
                 left = _needed_term(node[1])
                 return left if left is not None else _needed_term(node[2])
