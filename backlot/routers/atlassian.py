@@ -2319,7 +2319,7 @@ async def confluence_cql_search(request: Request):
                 "limit": limit,
                 "size": len(results),
                 "totalSize": total,
-                "cqlQuery": _cql_written_back(tokens),
+                "cqlQuery": _cql_written_back(tokens, _cql_space_key_spelling(conn)),
                 "searchDuration": 5,
                 "_links": links,
             }
@@ -3193,10 +3193,47 @@ def _cql_tokens(cql: str) -> list[tuple[str, str]]:
     return [(m.lastgroup, m.group()) for m in _CQL_TOKEN.finditer(cql) if m.lastgroup != "DROPPED"]
 
 
-def _cql_written_back(tokens: list[tuple[str, str]]) -> str:
+def _cql_space_key_spelling(conn):
+    """The spelling ``cqlQuery`` writes a `space.key` value in: the spelling a space is stored
+    under when the value names one, else None. A space is stored under its corpus name and under
+    the key the space reads advertise, and either spelling names it whatever its case, with an
+    exact spelling winning over a folded one where two spaces differ only in case."""
+    spellings, folded = set(), {}
+    for name in (r["name"] for r in store.list_containers(conn, "confluence")):
+        for spelling in (name, synth.confluence_space_key(name)):
+            spellings.add(spelling)
+            folded.setdefault(spelling.lower(), spelling)
+
+    def spell(value: str) -> str | None:
+        return value if value in spellings else folded.get(value.lower())
+
+    return spell
+
+
+def _cql_space_key_holds_quote(tokens: list[tuple[str, str]]) -> bool:
+    """Whether a `space.key` value holds a single quote, as `_cql_written_back` tracks one:
+    real cannot parse such a query (Confluence Cloud, 2026-10-26)."""
+    key = False
+    for i, (kind, text) in enumerate(tokens):
+        before = tokens[i - 1] if i else (None, None)
+        if kind == "OP" or kind == "WORD" and text.lower() == "in":
+            field = i - 1 - (kind == "WORD" and i > 1 and before[1].lower() == "not")
+            key = field >= 0 and tokens[field][1].lower() == "space.key"
+        elif kind in ("WORD", "QUOTED") and key and (before[0] == "OP" or before[1] in "(,"):
+            if "'" in _cql_unquote(kind, text):
+                return True
+        elif before[1] == ")" or kind == "WORD" and text.lower() in ("and", "or"):
+            key = False
+    return False
+
+
+def _cql_written_back(tokens: list[tuple[str, str]], space_key=None) -> str:
     """``cqlQuery`` as real writes the query back: its tokens one space apart, in the case and the
-    quotes they were sent in, and each value of `space.key` in single quotes, in place of its own
-    (Confluence Cloud, 2026-10-22 and 2026-10-25)."""
+    quotes they were sent in, except each value of `space.key`, which is written in single quotes
+    with an escaped double quote taken out of it and, when it names a space, as the key of that
+    space (Confluence Cloud, 2026-10-22, 2026-10-25 and 2026-10-26). A value naming no space is
+    written as sent apart from the double quotes taken out, and every other field keeps its value
+    as sent."""
     out, key = [], False
     for i, (kind, text) in enumerate(tokens):
         before = tokens[i - 1] if i else (None, None)
@@ -3204,7 +3241,10 @@ def _cql_written_back(tokens: list[tuple[str, str]]) -> str:
             field = i - 1 - (kind == "WORD" and i > 1 and before[1].lower() == "not")
             key = field >= 0 and tokens[field][1].lower() == "space.key"
         elif kind in ("WORD", "QUOTED") and key and (before[0] == "OP" or before[1] in "(,"):
-            text = f"'{text[1:-1]}'" if kind == "QUOTED" else f"'{text}'"
+            value = text[1:-1].replace('\\"', "") if kind == "QUOTED" else text
+            if space_key is not None:
+                value = space_key(value) or value
+            text = f"'{value}'"
         elif before[1] == ")" or kind == "WORD" and text.lower() in ("and", "or"):
             key = False
         out.append(text)
@@ -3215,13 +3255,17 @@ def _cql_refusal(tokens: list[tuple[str, str]]):
     """The 400 real answers a CQL it cannot read with, or None for one this server reads, by where
     the reading stops: ``errors.atlassian.cql_not_parsed`` at no clause at all, a token no clause
     takes, a `not` anywhere but straight after `and`, `order by` with no clause before it, a list
-    that is empty or ends in a comma, and anything left after `order by`; ``cql_expecting_value`` at
+    that is empty or ends in a comma, a `space.key` value holding a single quote, and anything
+    left after `order by`; ``cql_expecting_value`` at
     an operator followed by nothing or by a token that is no value, and at an `in` list never
     closed; ``cql_missing_closing_parenthesis`` at a `(` never closed; and
     ``cql_unrecognised_clause`` at words or quoted values left after a whole query. Each one's
     docstring gives the queries that answered it. A field CQL does not have, a field with no
     operator, and an operator or a value the field does not take (`foo`, `type`, `type<page`,
     `type=PAGE`) are refused on real with messages of their own, and answered at 200 here."""
+    if _cql_space_key_holds_quote(tokens):
+        return errors_atlassian.cql_not_parsed()
+
     at = 0
 
     def peek(offset=0):
